@@ -6,6 +6,7 @@ import React, {
   useContext,
   useEffect,
   useState,
+  useRef
 } from 'react';
 import { DataSyncContext } from './data-sync-context';
 import axios from 'axios';
@@ -45,6 +46,7 @@ export const OfflineSyncProvider: FC<{
 }> = ({ children, render, onStatusChange, onCallback }) => {
   // Manage state for data, offline status, and online status
   const [data, setData] = useState<Record<string, any>>({});
+  const isSyncing = useRef<boolean>();
   const [isOnline, setIsOnline] = useState<boolean>(
     window?.navigator?.onLine ?? true
   );
@@ -57,7 +59,6 @@ export const OfflineSyncProvider: FC<{
       console.log('Network status:', isConnected ? 'Online' : 'Offline');
       if (isConnected) {
         handleOnline();
-
       } else {
         handleOffline();
 
@@ -168,6 +169,10 @@ export const OfflineSyncProvider: FC<{
   };
 
   const syncOfflineRequests = async () => {
+    if (isSyncing.current) {
+      return;
+    }
+    isSyncing.current = true;
     const storedRequests: any = await getStoredRequests();
     if (!storedRequests || storedRequests.length === 0) {
       return;
@@ -192,6 +197,7 @@ export const OfflineSyncProvider: FC<{
         }
       }
     }
+    isSyncing.current = false;
   };
 
   return (
