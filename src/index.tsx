@@ -6,13 +6,13 @@ import React, {
   useContext,
   useEffect,
   useState,
-  useRef
+  useRef,
 } from 'react';
 import { DataSyncContext } from './data-sync-context';
 import axios from 'axios';
 import localForage from 'localforage';
-
 import { omit } from 'underscore';
+
 const api = axios.create();
 const RETRY_LIMIT = 0;
 const RETRY_DELAY_MS = 1000;
@@ -32,10 +32,23 @@ import useNetworkStatus from './hooks/useNetworkStatus';
 // const hasWindow = () => {
 //   return window && typeof window !== 'undefined';
 // };
+interface ApiRequest {
+  id: string;
+  type?: string;
+  url: string;
+  method: string;
+  data?: any;
+  isFormdata?: boolean;
+  retryCount?: number;
+}
+
 type ConfigType = {
   isFormdata?: boolean;
   maxRetry?: number;
+  executionOrder?: string[];
+  sequentialProcessing?: boolean;
 };
+
 export const OfflineSyncProvider: FC<{
   children: ReactElement;
   render?: (status: { isOffline?: boolean; isOnline: boolean }) => ReactNode;
@@ -43,10 +56,10 @@ export const OfflineSyncProvider: FC<{
   onCallback?: (data: any) => void;
   toastConfig?: any;
   config?: ConfigType;
-}> = ({ children, render, onStatusChange, onCallback }) => {
+}> = ({ children, render, onStatusChange, onCallback, config }) => {
   // Manage state for data, offline status, and online status
   const [data, setData] = useState<Record<string, any>>({});
-  const isSyncing = useRef<boolean>();
+  const isSyncing = useRef<boolean>(false);
   const [isOnline, setIsOnline] = useState<boolean>(
     window?.navigator?.onLine ?? true
   );
@@ -61,7 +74,6 @@ export const OfflineSyncProvider: FC<{
         handleOnline();
       } else {
         handleOffline();
-
       }
     }
   }, [isConnected]);
@@ -110,10 +122,17 @@ export const OfflineSyncProvider: FC<{
       if (apiConfig?.isFormdata && apiConfig?.data instanceof FormData) {
         // console.log({ apiConfig })
         const newData = await _formDataToObject(apiConfig.data);
-        storedRequests.push(omit({ ...apiConfig, data: newData }, 'onSuccess'));
+        storedRequests.push(
+          omit(
+            { ...apiConfig, data: newData, type: apiConfig.type },
+            'onSuccess'
+          )
+        );
       } else {
         console.log('Saving request normally');
-        storedRequests.push(omit({ ...apiConfig }, 'onSuccess'));
+        storedRequests.push(
+          omit({ ...apiConfig, type: apiConfig.type }, 'onSuccess')
+        );
       }
       console.log('perform forage after:', { storedRequests });
       const result = await localForage.setItem(
@@ -128,7 +147,7 @@ export const OfflineSyncProvider: FC<{
 
   // Function to perform the actual API request and handle retries
   const performRequest = async (config: any): Promise<any> => {
-    console.log("Inside performRequest")
+    console.log('Inside performRequest');
     try {
       let response;
       if (config?.isFormdata && !(config?.data instanceof FormData)) {
@@ -142,14 +161,21 @@ export const OfflineSyncProvider: FC<{
       return response.data;
     } catch (error) {
       console.log('packageError', { error });
-      console.log("Inside performRequest error: ", { rc: config.retryCount, RETRY_LIMIT })
-      if (config.retryCount < RETRY_LIMIT) {
+      console.log('Inside performRequest error: ', {
+        rc: config.retryCount,
+        RETRY_LIMIT,
+      });
+      if ((config.retryCount ?? 0) < RETRY_LIMIT) {
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
-        config.retryCount++;
+        if (config.retryCount === undefined) {
+          config.retryCount = 1;
+        } else {
+          config.retryCount++;
+        }
         return performRequest(config);
       } else {
         // Retry limit reached, save the request to offline storage
-        console.log("Saving request to offline storage");
+        console.log('Saving request to offline storage');
         await saveRequestToOfflineStorage(config);
         return error;
         // throw new Error('Exceeded retry limit, request saved for offline sync.');
@@ -168,6 +194,64 @@ export const OfflineSyncProvider: FC<{
     }
   };
 
+  const processRequestsSequentially = async (
+    requests: ApiRequest[],
+    executionOrder?: string[]
+  ) => {
+    const results = [];
+
+    if (executionOrder && executionOrder.length > 0) {
+      const requestsByType: Record<string, ApiRequest[]> = {};
+
+      for (const request of requests) {
+        const type = request.type || 'default';
+        if (!requestsByType[type]) {
+          requestsByType[type] = [];
+        }
+        requestsByType[type].push(request);
+      }
+
+      for (const type of executionOrder) {
+        const typeRequests = requestsByType[type] || [];
+        for (const request of typeRequests) {
+          try {
+            const result = await performRequest(request);
+            results.push({ request, result });
+          } catch (error) {
+            console.error(`Error processing ${type} request:`, error);
+            results.push({ request, error });
+          }
+        }
+      }
+
+      for (const type in requestsByType) {
+        if (!executionOrder.includes(type)) {
+          for (const request of requestsByType[type]) {
+            try {
+              const result = await performRequest(request);
+              results.push({ request, result });
+            } catch (error) {
+              console.error(`Error processing ${type} request:`, error);
+              results.push({ request, error });
+            }
+          }
+        }
+      }
+    } else {
+      for (const request of requests) {
+        try {
+          const result = await performRequest(request);
+          results.push({ request, result });
+        } catch (error) {
+          console.error(`Error processing request:`, error);
+          results.push({ request, error });
+        }
+      }
+    }
+
+    return results;
+  };
+
   const syncOfflineRequests = async () => {
     if (isSyncing.current) {
       return;
@@ -175,29 +259,44 @@ export const OfflineSyncProvider: FC<{
     isSyncing.current = true;
     const storedRequests: any = await getStoredRequests();
     if (!storedRequests || storedRequests.length === 0) {
+      isSyncing.current = false;
       return;
     }
 
-    console.log("Inside syncOfflineRequests", storedRequests)
+    console.log('Inside syncOfflineRequests', storedRequests);
     const requestClone = [...storedRequests];
-    for (const request of storedRequests) {
-      console.log("Inside syncOfflineRequests loop, ", storedRequests)
-      if (request) {
-        try {
-          await performRequest(request);
-          // Remove the request with a matching id from requestClone
+
+    try {
+      let results;
+      if (config?.executionOrder) {
+        results = await processRequestsSequentially(
+          requestClone,
+          config.executionOrder
+        );
+      } else if (config?.sequentialProcessing) {
+        results = await processRequestsSequentially(requestClone);
+      } else {
+        results = await Promise.all(requestClone.map(performRequest));
+      }
+
+      for (const result of results) {
+        const request = result.request || result;
+        const error = result.error;
+        if (!error) {
           const updatedRequests = requestClone.filter(
             sr => sr.id !== request.id
           );
           requestClone.splice(0, requestClone.length, ...updatedRequests);
-        } catch (error) {
-          console.log({ error });
-        } finally {
-          await localForage.setItem(API_REQUESTS_STORAGE_KEY, requestClone);
+        } else {
+          console.error('Failed to process request:', request, error);
         }
       }
+    } catch (error) {
+      console.error('Error in syncOfflineRequests:', error);
+    } finally {
+      await localForage.setItem(API_REQUESTS_STORAGE_KEY, requestClone);
+      isSyncing.current = false;
     }
-    isSyncing.current = false;
   };
 
   return (
