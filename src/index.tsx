@@ -17,6 +17,7 @@ const api = axios.create();
 const RETRY_LIMIT = 0;
 const RETRY_DELAY_MS = 1000;
 const API_REQUESTS_STORAGE_KEY = 'apiRequests';
+const OFFLINE_RESPONSES_STORAGE_KEY = 'offlineResponses';
 
 import {
   generateUuid,
@@ -37,9 +38,10 @@ interface ApiRequest {
   type?: string;
   url: string;
   method: string;
-  data?: any;
+  data?: any | ((previousResponses: any[]) => Promise<any>);
   isFormdata?: boolean;
   retryCount?: number;
+  dependsOn?: string;
 }
 
 type ConfigType = {
@@ -113,7 +115,7 @@ export const OfflineSyncProvider: FC<{
 
   const saveRequestToOfflineStorage = async (apiConfig: any) => {
     try {
-      const storedRequests: Array<any> =
+      const storedRequests: any =
         (await localForage.getItem(API_REQUESTS_STORAGE_KEY)) || [];
       console.log('perform stored', {
         req: storedRequests,
@@ -145,16 +147,53 @@ export const OfflineSyncProvider: FC<{
     }
   };
 
+  const saveResponseToOfflineStorage = async (type: string, response: any) => {
+    try {
+      const storedResponses: Record<string, any> =
+        (await localForage.getItem(OFFLINE_RESPONSES_STORAGE_KEY)) || {};
+      if (!storedResponses[type]) {
+        storedResponses[type] = [];
+      }
+      storedResponses[type].push(response);
+      await localForage.setItem(OFFLINE_RESPONSES_STORAGE_KEY, storedResponses);
+    } catch (error) {
+      console.error('Error saving response to offline storage:', error);
+    }
+  };
+
+  const getOfflineResponses = async (type: string) => {
+    try {
+      const storedResponses: Record<string, any> =
+        (await localForage.getItem(OFFLINE_RESPONSES_STORAGE_KEY)) || {};
+      return storedResponses[type] || [];
+    } catch (error) {
+      console.error('Error getting offline responses:', error);
+      return [];
+    }
+  };
+
   // Function to perform the actual API request and handle retries
   const performRequest = async (config: any): Promise<any> => {
     console.log('Inside performRequest');
     try {
+      let requestData = config.data;
+      if (typeof requestData === 'function') {
+        const dependencyResponses = config.dependsOn
+          ? await getOfflineResponses(config.dependsOn)
+          : [];
+        requestData = await requestData(dependencyResponses);
+      }
+
       let response;
-      if (config?.isFormdata && !(config?.data instanceof FormData)) {
-        const updateConfig = { ...config, data: objectToFormData(config.data) };
+      if (config?.isFormdata && !(requestData instanceof FormData)) {
+        const updateConfig = { ...config, data: objectToFormData(requestData) };
         response = await api.request(updateConfig);
       } else {
-        response = await api.request(config);
+        response = await api.request({ ...config, data: requestData });
+      }
+
+      if (config.type) {
+        await saveResponseToOfflineStorage(config.type, response.data);
       }
 
       onCallback && onCallback({ config, data: response, sendRequest });
