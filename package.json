@@ -1,5 +1,5 @@
 {
-  "version": "0.1.89",
+  "version": "0.1.90",
   "license": "MIT",
   "main": "dist/index.js",
   "typings": "dist/index.d.ts",
@@ -39,7 +39,7 @@
   },
   "name": "offline-request-handler",
   "author": "Amit Sharma",
-  "module": "dist/offline-request-handler-test.esm.js",
+  "module": "dist/offline-request-handler.esm.js",
   "size-limit": [
     {
       "path": "dist/offline-request-handler.cjs.production.min.js",
