@@ -13,7 +13,8 @@ import axios from 'axios';
 import localForage from 'localforage';
 import { omit } from 'underscore';
 
-const api = axios.create();
+//@ts-ignore
+const api = axios?.create();
 const RETRY_LIMIT = 0;
 const RETRY_DELAY_MS = 1000;
 const API_REQUESTS_STORAGE_KEY = 'apiRequests';
